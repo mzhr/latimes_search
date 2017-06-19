@@ -1,0 +1,146 @@
+#!/usr/bin/env python
+
+# Imports
+import argparse
+import string
+import struct
+from index_files import build_stopword, remove_stopwords, process_line
+
+
+def commandline_options():
+    # Manage commandline options
+    commandline_parser = argparse.ArgumentParser(
+        description="Index document file for search.")
+    commandline_parser.add_argument("document_file",
+                                    type=argparse.FileType("r"),
+                                    help="The document that will be indexed")
+    commandline_parser.add_argument("-s", "--stopwords",
+                                    type=argparse.FileType("r"),
+                                    help="List of stopwords to ignore")
+    commandline_parser.add_argument("-p", "--print_flag",
+                                    action="store_true",
+                                    default=False,
+                                    help="Verbose display of indexing process")
+    return commandline_parser.parse_args()
+
+
+def build_index(document_file, map_file, stopword_hashtable, print_flag):
+    # Parse file for map
+    indexing_flag = False
+    document_no = 0
+    inverted_index = {}
+    # document term frequency
+    dtf = 0
+
+    # Process each line in the document file
+    for line in iter(document_file.readline, ''):
+        # Strip read in the next line and remove new line characters
+        line = line.strip("\n")
+
+        # If encounter a closing tag, stop indexing
+        if (line == "</TEXT>" or line == "</HEADLINE>"
+                or line == "</BYLINE>" or line == "</GRAPHIC>"):
+            indexing_flag = False
+
+        # If parsing tag is on then parse the line
+        if (indexing_flag == True and line != "<P>" and line != "</P>" 
+                and "<TABLE" not in line):
+            temp = update_index(line, stopword_hashtable,
+                                inverted_index, document_no, print_flag)
+            inverted_index = temp[0]
+            dtf += temp[1]
+
+        # Start Parsing if encounter a indexing tag
+        if (line == "<TEXT>" or line == "<HEADLINE>"
+                or line == "<BYLINE>" or line == "<GRAPHIC>"):
+            indexing_flag = True
+
+        # Add to map file if encounter a document tag
+        if line == "<DOC>":
+            current_pos = document_file.tell()
+            docid = document_file.readline().split()[1]
+            document_file.seek(current_pos, 0)
+            map_file.write(str(document_no) + " " + str(current_pos) + " " +
+                           docid + " ")
+            if print_flag:
+                print("Adding document number " + str(document_no) +
+                      " to map file.")
+
+        if line == "</DOC>":
+            map_file.write(str(dtf) + "\n")
+            dtf = 0
+            document_no = document_no + 1
+
+    return inverted_index
+
+
+def create_files(inverted_index, print_flag):
+    # Write inverted index to binary file and the lexicon
+    invlist = open("invlist", "wb")
+    lexicon = open("lexicon", "w")
+
+    # For each word in the inverted index, write into file
+    for key, value in inverted_index.iteritems():
+        tdf = 0
+        for child, k in value[1].iteritems():
+            tdf += k
+        if print_flag == True:
+            print("Adding term " + key + " to lexicon.")
+        lexicon.write(key + " " + str(invlist.tell()) + " " + str(value[0]) + 
+                      " " + str(tdf) + "\n")
+
+        # Output what it is writing
+        if print_flag == True:
+            print("Adding term " + key + " " +
+                  (str(value)).translate(None, string.punctuation) +
+                  " to invlist file.")
+
+        # Add key, value of inverted index to file
+        for d, f in value[1].iteritems():
+            invlist.write(struct.pack("I", d))
+            invlist.write(struct.pack("I", f))
+
+
+def index():
+    args = commandline_options()
+    stopwords = build_stopword(args.stopwords)
+    inverted_index = build_index(args.document_file, open("map", 'w'), 
+                                 stopwords, args.print_flag)
+    create_files(inverted_index, args.print_flag)
+
+
+def update_index(line, stopword_hashtable, inverted_index, document_no, pflag):
+    # Case fold and tokenize line
+    newline = line.strip().split()
+    newline = process_line(newline)
+    newline = remove_stopwords(newline, stopword_hashtable)
+    tfc = 0
+
+    # Add each word in the line to the inverted index
+    for term in newline:
+        # Case 2: Word exists in index
+        if term in inverted_index:
+            index = inverted_index[term]
+            # Case 2.2: Word and document is found in index, increase f
+            if document_no in index[1]:
+                if pflag == True:
+                    print("Adding term " + term + " to existing df tuple.")
+                index[1][document_no] = index[1][document_no] + 1
+            # Case 2.1: Word is found but not document, add document
+            else:
+                if pflag == True:
+                    print("Adding term " + term + " to new df tuple.")
+                index[0] = index[0] + 1
+                index[1][document_no] = 1
+        # Case 1: Word doesn't exist in index, add word to index
+        else:
+            inverted_index[term] = [1, {document_no: 1}]
+            if pflag == True:
+                print("Adding term " + term + " to index.")
+        tfc += 1
+
+    return [inverted_index, tfc]
+
+
+if __name__ == '__main__':
+    index()

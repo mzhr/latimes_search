@@ -1,0 +1,185 @@
+#!/usr/bin/env python
+
+# Imports
+import argparse
+import struct
+import string
+from math import log
+from timeit import default_timer as timer
+from summary import print_summary
+from minheap import MinHeap
+from index_files import *
+
+def commandline_options():
+    # Manage commandline options
+    commandline_parser = argparse.ArgumentParser(
+            description="Index document file for search.")
+    commandline_parser.add_argument("-BM25", action="store_true", 
+                                    default=False,
+                                    help="Label of query")
+    commandline_parser.add_argument("-q", "--query_lable", type=str,
+                                    default=None, required=True,
+                                    help="Label of query")
+    commandline_parser.add_argument("-s", "--stopwords",
+                                    type=argparse.FileType("r"),
+                                    help="List of stopwords to remove " +
+                                         "from search")
+    commandline_parser.add_argument("-l", "--lexicon_file",
+                                    type=argparse.FileType("r"),
+                                    required=True,
+                                    help="Lexicon file of all lexi in " + 
+                                          "inverted index")
+    commandline_parser.add_argument("-m", "--map_file",
+                                    type=argparse.FileType("r"),
+                                    required=True,
+                                    help="Map file of all document positions")
+    commandline_parser.add_argument("-i", "--invlist_file",
+                                    type=argparse.FileType("r"),
+                                    required=True,
+                                    help="Inverted index of document file")
+    commandline_parser.add_argument("-n", "--num_results", type=int,
+                                    default=10,
+                                    help="Number of results to return")
+    summary_group = commandline_parser.add_mutually_exclusive_group()
+    
+    # Commandline options for summarisation
+    summary_group.add_argument('--query_summary', action='store_true', 
+                               default=False)
+    summary_group.add_argument('--generic_summary', action='store_true', 
+                               default=False)
+    commandline_parser.add_argument("-d", "--doc_file",
+                                    type=argparse.FileType("r"),
+                                    help="The orignial document file so " + 
+                                         "that it can be summarised")
+
+    # Mandatory query option
+    commandline_parser.add_argument("queryterms", nargs='+',
+                                    help="Terms for searching")
+
+    args = commandline_parser.parse_args()
+
+    # Make sure docfile is given if summary is to be done
+    if (args.generic_summary or args.query_summary) and args.doc_file == None:
+        commandline_parser.error("Document file must be given if summary is to be given")
+
+    return args
+
+
+def calculate_doc_weight(index_map):
+    # Calculates average document weight
+    documentTotal = len(index_map)
+    docTotalWeights = 0
+    for i in range(len(index_map)):
+        docTotalWeights += index_map[i][2]
+    return docTotalWeights / documentTotal
+
+
+def bm25(n, docsContainT, occOftInD, docLength, avDocLength):
+    # Equation for BM25 ranking
+    k1 = 1.2
+    K = calcK(k1,docLength, avDocLength)
+    return log((n - docsContainT + 0.5 / docsContainT + 0.5) * ((k1 + 1) * occOftInD / K + occOftInD))
+
+
+def calcK(k1,docLength, avDocLength):
+    # K in BM25 Algorithm calculation
+    b = 0.75
+    return k1 * ((1 - b) + b * docLength / avDocLength)
+
+
+def get_topN(n, accumulator, min_heap):
+    # Use minheap to get top n values
+    for key, val in accumulator.items():
+        min_heap.push((key, val))
+    sortedHeap = sorted(min_heap.getMinHeapToValue(n), key=lambda x:x[1], reverse=True)
+
+    # Ignore default value
+    results = []
+    for k in sortedHeap:
+        if k == (0, 0):
+            continue
+        else:
+            results.append(k)
+    return results
+
+
+def search():
+    start = timer()
+
+    # Get commandline options and read/build data structures
+    args = commandline_options()
+    lexicon = build_lexicon(args.lexicon_file)
+    index_map = build_map(args.map_file)
+    queries = process_line(args.queryterms)
+    if args.stopwords != None:
+        queries = remove_stopwords(queries, build_stopword(args.stopwords))
+
+    # Initialise data structures for document ranking
+    average_doc_weight = calculate_doc_weight(index_map)
+    documentTotal = len(index_map)
+    query_result = dict()
+    min_heap = MinHeap(args.num_results)
+
+    # Run search on each query if in index
+    for queryitem in queries:
+        if queryitem not in lexicon and args.BM25 == False:
+            print "Query term '" + queryitem + "' could not be found"
+        elif queryitem in lexicon:
+            # Use Lexicon to find location in inverted index
+            invlist_location = lexicon[queryitem][0]
+            args.invlist_file.seek(invlist_location, 0)
+
+            # Get df many pairs from inverted `index
+            docs = []
+            for i in range(lexicon[queryitem][1]):
+                d = struct.unpack("I", args.invlist_file.read(4))[0]
+                f = struct.unpack("I", args.invlist_file.read(4))[0]
+                docs.append([d, f])
+
+            # Print statistics in query ranking isn't used, assignment 1
+            if args.BM25 == False:
+                print queryitem
+                print len(docs)
+
+            # For each of the df pairs, print DOCNO and the df
+            for k, v in docs:
+                if args.BM25 == False:
+                    # Print results if not using BM25
+                    print index_map[k][1], v
+                    if args.query_summary or args.generic_summary:
+                        # For that pair, print some summary about it
+                        print_summary(args.doc_file, index_map[k][0], 
+                                      queryitem, lexicon, args.query_summary)
+                else:
+                    # Aggregate scores if BM25 is used
+                    score = bm25(documentTotal,lexicon[queryitem][1], v, 
+                                 index_map[k][2], average_doc_weight)
+                    if index_map[k][1] in query_result:
+                        query_result[k] += score
+                    else:
+                        query_result[k] = score
+
+    # If ranking is to be used, get topn results and print
+    if args.BM25 == True:
+        results = get_topN(args.num_results, query_result, min_heap)
+
+        if len(queries) == 0:
+            print "Query invalid"
+        elif len(results) == 0:
+            print "No results found for '" + ' '.join(queries) + "'"
+        else:
+            print ' '.join(queries)
+            print len(query_result)
+
+        # Display ranked results with summary if asked for in commandline
+        for doc in range(len(results)):
+            print args.query_lable, index_map[results[doc][0]][1], doc, results[doc][1]
+            if args.query_summary or args.generic_summary:
+                print_summary(args.doc_file, index_map[results[doc][0]][0], 
+                              queries, lexicon, args.query_summary)
+
+    print "Running time:", int((timer() - start)*1000), "ms"
+
+
+if __name__ == '__main__':
+    search()
